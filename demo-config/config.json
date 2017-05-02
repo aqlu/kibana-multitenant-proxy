@@ -1,0 +1,27 @@
+{
+  "port": "8888",
+  "refresh_port": "8889",
+  "kibana_server": "http://172.19.68.42:5601",
+  "es_server": "http://172.19.65.66:9200",
+  "es_user_index": ".sys_auth",
+  "es_user_type": "user_info",
+  "default_privileges": [],
+  "data_mask_config": [
+    {
+      "index_prefix": "logstash",
+      "type": "APP_LOG",
+      "mask_fields": [
+        {
+          "field": "appName",
+          "reg": "/pc/g",
+          "value": "*****"
+        },
+        {
+          "field": "level",
+          "reg": "/INFO/g",
+          "value": "info"
+        }
+      ]
+    }
+  ]
+}

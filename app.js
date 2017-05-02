@@ -1,271 +1,308 @@
+'use strict';
+
+//noinspection JSUnresolvedFunction
 /**
  *
- * Created by huangpengcheng on 2016/6/22 0022.
+ * Created by angus on 2017/04/28.
  */
 var config = require("./config.json");
-var hoxy = require('hoxy');
-var port=config.port;
-var refreshPort=config.refreshPort;
-var kibanaServer=config.kibanaServer;
-var chkTimeRange=config.chkTimeRange;
-var proxy = hoxy.createServer({
-    reverse: kibanaServer,
+const hoxy = require('hoxy');
+
+const port = config.port;
+const refresh_port = config.refresh_port;
+
+const proxy = hoxy.createServer({
+  reverse: config.kibana_server
 });
-var totalNum=config.totalNum;
-var es_Server=config.es_Server;
-var es_UserInfoUrl=config.es_UserInfoUrl;
+const es_server = config.es_server.endsWith("/") ? config.es_server : config.es_server + "/";
 
-var dataMask=config.dataMask;
-var dataMaskConfig=config.dataMaskConfig;
+const es_user_index = config.es_user_index || ".sys_auth";
+const es_user_type = config.es_user_type || "user_info";
 
-var arrUser=[];
-var arrIndexName=[];
+const default_privileges = config.default_privileges || [];
+const data_mask_config = config.data_mask_config;
+
+var authInfo = {};
 var refreshFlag;
-var refreshDate;
-var maxDays;
 
-var _MS_PER_DAY = 1000 * 60 * 60 * 24;
-// a and b are javascript Date objects
-function dateDiffInDays(a, b) {
-    // Discard the time and time-zone information.
-    var utc1 = Date.UTC(a.getFullYear(), a.getMonth(), a.getDate());
-    var utc2 = Date.UTC(b.getFullYear(), b.getMonth(), b.getDate());
+/**
+ * 校验用户是否有对应索引的权限
+ */
+function validatePrivilege(user, indexName) {
+  if (indexName == '.kibana') { //不校验.kibana索引的权限
+    return true;
+  }
 
-    return Math.floor((utc2 - utc1) / _MS_PER_DAY);
-}
+  user = user.toLowerCase();
 
-function syncGetMaxDay(indexName){
-    //get how long time of index a can be used in query with sync way
-    var request = require("sync-request");
-    var strurl = es_Server+indexName+'/_count';
-    var res = request('GET', strurl);
-    var strResData;
+  var userIndices = authInfo[user] ? authInfo[user] : default_privileges; // 默认都赋予查询logstash*的权限
 
-    console.log('the url of count is '+strurl);
-
-    var cntOfIndex;
-    strResData=res.getBody().toString();
-
-
-    console.log('start to get the maxDay ES can support');
-    cntOfIndex=parseInt(JSON.parse(strResData)['count']);
-
-    console.log('the count of this index is ',cntOfIndex);
-
-    var strurl = es_Server+indexName+'/_search';
-
-    var res = request('POST', strurl,{json:{'aggs':{'start':{'min':{'field':'@timestamp'}}}}});
-    strResData=res.getBody().toString();
-
-
-    var strStartTime=JSON.parse(strResData)['aggregations']['start']['value_as_string'];
-    console.log('strStartTime is '+strStartTime);
-    var startTime= new Date(Date.parse(strStartTime.substr(0,10)));
-    console.log('startTime is '+startTime);
-
-    var res = request('POST', strurl,{json:{'aggs':{'end':{'max':{'field':'@timestamp'}}}}});
-    strResData=res.getBody().toString();
-
-
-    var strEndTime=JSON.parse(strResData)['aggregations']['end']['value_as_string'];
-    console.log('strEndTime is '+strEndTime);
-    var endTime= new Date(Date.parse(strEndTime.substr(0,10)));
-    console.log('endTime is '+endTime);
-
-    var totalDay=dateDiffInDays(startTime,endTime);
-    console.log("time range of this index is "+totalDay);
-
-    maxDays=Math.floor(totalNum*totalDay/cntOfIndex)+1;
-    console.log('the max days of '+indexName + ' is '+maxDays);
-
-}
-
-function checkUserInfo(user, indexName) {
-    // check if user a can get index b.
-    console.log('check userinfo');
-    for(i=0;i<arrUser.length;i++) {
-
-        if (arrUser[i]==user && indexName.indexOf(arrIndexName[i])==0){
-            return true;
-        }
-        if (arrUser[i]==user && arrIndexName[i]=='root'){
-            return true;
-        }
-        
+  for (var i = 0; i < userIndices.length; i++) {
+    // 索引名相等、权限为ALL、权限正则相匹配都判定为校验通过
+    if (userIndices[i] == "ALL" || indexName == userIndices[i] || new RegExp(userIndices[i]).test(indexName)) {
+      return true;
     }
-    return false;
+  }
+  return false;
 }
 
 function ifGetUserInfo() {
-    // check need to get userinfo or not     
-    var myDate= new Date();
-    var curDate=myDate.getDate();
+  // check need to get userinfo or not
+  if (typeof refreshFlag == 'undefined') {
+    refreshFlag = true;
+    logger.info('first time to refresh user');
+  }
 
-    if (typeof refreshFlag=='undefined'){
-        refreshFlag=true;
-        refreshDate=curDate;
-        console.log('fisrt time to run on '+ refreshDate+ ' need to refresh');
-    }
-    if ( refreshDate!=curDate){
-        refreshFlag=true;
-        refreshDate=curDate;
-        console.log('change day to  '+ refreshDate+ ' need to refresh');
-    }
-    if ( refreshFlag==true){
-        console.log('It will get UserInfo ');
-        syncGetUserInfo();
-        refreshFlag=false;
-    }
+  if (refreshFlag) {
+    syncUserInfo();
+    refreshFlag = false;
+  }
 }
 
-function syncGetUserInfo() {
-    // get index that user can access
-    var request = require("sync-request");
-    var strurl = es_UserInfoUrl+'_search?q=user:*';
-    console.log('get userinfo of all');
-    var res = request('GET', strurl);
-    var strResData;
-    strResData=res.getBody().toString();
+/**
+ * 同步用户权限信息
+ */
+function syncUserInfo() {
+  // get index that user can access
+  var request = require("sync-request");
 
-    var i;
+  var res = request('GET', es_server + es_user_index + "/" + es_user_type + '/_search?q=user:*');
+  if (res.statusCode >= 200 && res.statusCode < 300) {
+    var strResData = res.getBody().toString();
+    var userResp = JSON.parse(strResData);
 
-    console.log('start to save userinfo one by one');
-    for(i=0;i<JSON.parse(strResData)['hits']['hits'].length;i++) {
-        arrUser.push(JSON.parse(strResData)['hits']['hits'][i]['_source']['user']);
-        arrIndexName.push(JSON.parse(strResData)['hits']['hits'][i]['_source']['indexname']);
-
+    for (var i = 0; i < userResp['hits']['hits'].length; i++) {
+      var user = userResp['hits']['hits'][i]['_source']['user'].toLowerCase();
+      authInfo[user] = userResp['hits']['hits'][i]['_source']['indices'];
     }
-    console.log('get userinfo end');
+
+    logger.info('sync user info success, authInfo:' + JSON.stringify(authInfo));
+  } else {
+    logger.warn('sync user info failed.' + res);
+  }
 
 }
 
-var http=require('http');
-http.createServer(function (request,response) {
-    syncGetUserInfo();
-    var fs=require('fs');
-    config=JSON.parse(fs.readFileSync('./config.json'));
-            console.log(config);
-    response.writeHead(200,{'Content-Type':'text-plain'});
-    response.end('UserInfo and Config Refresh Success! \n');
+var http = require('http');
+http.createServer(function (request, response) {
+  if (request.url == "/refresh") {
+    syncUserInfo(); // 刷新用户权限
 
-}).listen(refreshPort);
+    var fs = require('fs'); // 刷新配置
+    config = JSON.parse(fs.readFileSync('./config.json'));
+    logger.info("sync config:" + JSON.stringify(config));
 
+
+    response.writeHead(200, {'Content-Type': 'application/json'});
+    response.end(JSON.stringify(authInfo));
+  } else {
+    response.writeHead(200, {'Content-Type': 'text/html'});
+    response.end('You can use "<a href="/refresh">/refresh></a>" to refresh user info. \n');
+  }
+}).listen(refresh_port);
+
+//noinspection JSUnusedLocalSymbols,JSUnresolvedFunction
+/**
+ * json响应结果前拦截，执行数据脱敏
+ */
 proxy.intercept({
-    phase: 'response',
-    mineType: 'application/json',
-    as: 'json',
-}, function (req, resp, cycle){ 
-
-    console.log('start to intercept response for data masking');
-
-    var i;
-    var j;
-    var k;
-
-    var indexToMask;
-
-    var fieldToMask;
-    var strRegForMask;
-    var regForMask;
-    var maskTo;
-
-    if (dataMask=='true'){
-
-        if ('responses' in resp._data.source._obj && resp._data.source._obj.responses[0].hits.hits.length>0){
-            console.log('response have data ');
-    
-            indexToMask=resp._data.source._obj.responses[0].hits.hits[0]._index;           
-            console.log('index in responses is '+indexToMask);
-    
-            k=0;
-            for (var k in dataMaskConfig){
-                if (indexToMask.indexOf(dataMaskConfig[k].indexPrefix)==0){
-                    console.log('the index need to mask');
-                    j=0;
-                    for (var j in dataMaskConfig[k].maskFields){
-                        fieldToMask=dataMaskConfig[k].maskFields[j].maskField;
-                        console.log('fieldToMask is '+fieldToMask);
-                        strRegForMask=dataMaskConfig[k].maskFields[j].maskReg;
-                        regForMask=eval(strRegForMask);
-                        console.log('regForMask is '+strRegForMask);
-                        maskTo=dataMaskConfig[k].maskFields[j].maskValue;
-                        console.log('maskTo is '+maskTo);
-                    
-                        i=0;
-                        for (var i in resp._data.source._obj.responses[0].hits.hits)
-                        {
-                            valueToMask=resp._data.source._obj.responses[0].hits.hits[i]._source[fieldToMask];
-                            var maskRes = valueToMask.replace(regForMask, maskTo);
-                            resp._data.source._obj.responses[0].hits.hits[i]._source[fieldToMask]=maskRes;
-                    
-                        }
-                    }
-                    break;
-                }
-
-            }
-
-        }
-
-    }
-
-    console.log('data masking is end');
-
-});
-
-proxy.intercept({
-    phase: 'request',
-    method: 'POST',
-    as: 'string',
+  phase: 'response',
+  mineType: 'application/json',
+  url: '/elasticsearch/_msearch', // Discover拉去索引数据请求
+  as: 'json'
 }, function (req, resp, cycle) {
-    var requrl = req.url,
-        requser = req._data['headers']['remote_user'],
-        indexname;
 
-    ifGetUserInfo(); 
+  if (data_mask_config && data_mask_config.length > 0) { // 是否有脱敏配置
 
-    if (requrl.indexOf('_msearch') != -1) {
-        reqparams = req.string.split('\n');
-        console.log('start to intercept request');
-        indexname = JSON.parse(reqparams[0])['index'];
-        console.log('request url is: ' + requrl);
+    // 判断响应结果是否包含数据
+    if (resp && resp._data && resp._data.statusCode >= 200 && resp._data.statusCode < 300 && "responses" in resp._data.source._obj && resp._data.source._obj.responses[0].hits.hits.length > 0) {
 
-        if (indexname instanceof  Array) {
-            indexname = indexname[0];
-        }
-        console.log('index name is :' + indexname);
-        console.log('request users:' + requser);
+      var kibanaResp = resp._data.source._obj;
+      var hits = kibanaResp.responses[0].hits.hits;
 
-        if ( checkUserInfo(requser,indexname)== false){
-            req.string = req.string.replace(indexname,'null');
-            console.log(indexname+ ' has been changed to null');
-        }
-        else {
-            console.log(indexname+ ' is ok , '+requser+' can access it');
-            if ( chkTimeRange== 'true'){
-                console.log(indexname+ ' need to check time range');
-                
-                post_time = JSON.parse(reqparams[1])['query']['filtered']['filter']['bool']['must'][0]['range']['@timestamp'];
-                starttime =  post_time.gte;
-                endtime =  post_time.lte;
-        
-                console.log("Start Time :" + new Date(starttime) + ',' + starttime);
-                console.log("End Time :" + new Date(endtime)+','+endtime);
-                console.log("Time Diff in days:" + Math.floor((endtime-starttime)/_MS_PER_DAY));                        
-                
-                syncGetMaxDay(indexname);
-                console.log('max is ' + maxDays);
-                if (Math.floor((endtime - starttime) / _MS_PER_DAY) > maxDays) {
-                        console.log("Search Range is too long, Change its start:" + (endtime - maxDays * _MS_PER_DAY).toString());
-                        req.string = req.string.replace(starttime.toString(), (endtime - maxDays * _MS_PER_DAY).toString());
-                        console.log("Request String has been modified: " + req.string);
-                }
+      var blurFunc = function (hit) {
+        for (var i = 0; i < data_mask_config.length; i++) { // 遍历所有脱敏配置项
+          var mask = data_mask_config[i];
+          if (hit._index.startsWith(mask.index_prefix) && hit._type == mask.type) { // index与type都匹配
+            for (var j = 0; j < mask.mask_fields.length; j++) {  // 遍历数据里面的字段
+              var mask_field = mask.mask_fields[j];
+              if (hit._source[mask_field.field]) {
+                hit._source[mask_field.field] = hit._source[mask_field.field].replace(eval(mask_field.reg), mask_field.value);
+              }
             }
+          }
         }
-        console.log('main request end');
+
+        return hit;
+      };
+
+      hits.map(blurFunc); // 数据脱敏
     }
+  }
 });
+
+//noinspection JSUnusedLocalSymbols,JSUnresolvedFunction
+/**
+ * 请求进来前拦截，进行用户授权检查
+ */
+proxy.intercept({
+  phase: 'request',
+  url: '/elasticsearch/_msearch', // Discover拉去索引数据请求
+  method: 'POST',
+  as: 'string'
+}, function (req, resp, cycle) {
+  // var req_url = req.url;
+  var req_user = req._data['headers']['remote_user'],
+    x_real_ip = req._data['headers']['x-real-ip'],
+    x_forwarded_for = req._data['headers']['x-forwarded-for'];
+
+  ifGetUserInfo();
+
+  if (!req_user) {
+    logger.warn("[Discover], can not get user! x-real-ip:[" + x_real_ip + "], x-forwarded-for: [" + x_forwarded_for + "]");
+    response_no_privilege(resp, undefined);
+    return;
+  }
+
+  var req_params = req.string.split('\n');
+  var index_name = JSON.parse(req_params[0])['index'];
+  if (index_name instanceof Array) {
+    index_name = index_name[0];
+  }
+
+  // 校验用户是否具有对应的index权限；
+  if (!validatePrivilege(req_user, index_name)) {
+    logger.warn("[Discover], [" + req_user + "] no have [" + index_name + "] privilege! x-real-ip:[" + x_real_ip + "], x-forwarded-for: [" + x_forwarded_for + "]");
+    response_no_privilege(resp, req_user);
+
+    // req.string = req.string.replace(index_name, 'null');
+    // logger.info(index_name + ' has been changed to null');
+  }
+});
+
+/**
+ * 请求进来前拦截，进行用户授权检查
+ * DevTools发送的请求
+ */
+proxy.intercept({
+  phase: 'request',
+  url: '/api/console/proxy', //DevTools发出的请求
+  as: 'string'
+}, function (req, resp, cycle) {
+  // var req_url = req.url;
+  var req_user = req._data['headers']['remote_user'],
+    x_real_ip = req._data['headers']['x-real-ip'],
+    x_forwarded_for = req._data['headers']['x-forwarded-for'];
+
+  ifGetUserInfo();
+
+  if (!req_user) {
+    logger.warn("[DevTools], can not get user! x-real-ip:[" + x_real_ip + "], x-forwarded-for: [" + x_forwarded_for + "]");
+    response_no_privilege(resp, undefined);
+    return;
+  }
+
+  // 校验用户是否具有ALL权限；DevTools必须要拥有ALL的权限；
+  if (!validatePrivilege(req_user, "ALL")) {
+    logger.warn("[DevTools], [" + req_user + "] no have [ALL] privilege. DevTools must have 'ALL' privilege. x-real-ip:[" + x_real_ip + "], x-forwarded-for: [" + x_forwarded_for + "]");
+    response_no_privilege(resp, req_user);
+  }
+});
+
+const response_no_privilege = function (resp, req_user) {
+  var now = new Date().getTime();
+  no_privilege_resp.responses[0].hits.hits[0]._id = now;
+  no_privilege_resp.responses[0].hits.hits[0]._source["@timestamp"] = format(now);
+  no_privilege_resp.responses[0].hits.hits[0].fields["@timestamp"] = [now];
+  no_privilege_resp.responses[0].hits.hits[0]._source["message"] = req_user ? "[" + req_user + "], 你没有相关权限！" : "请先登录再访问！";
+  no_privilege_resp.responses[0].hits.hits[0].highlight["message"] = ["@kibana-highlighted-field@" + no_privilege_resp.responses[0].hits.hits[0]._source.message + "@/kibana-highlighted-field@"];
+
+  // resp.statusCode = 401; //TODO 不返回401是因为kibana在没安装xpack的权限包时，会陷入死循环。
+  resp.statusCode = 200;
+  resp.headers = {"content-type": "application/json"};
+  resp.json = no_privilege_resp;
+};
 
 proxy.listen(port, function () {
-    console.log('The proxy is listening on port ' + port + '.');
+  logger.info('The proxy is listening on port ' + port + '.');
 });
+
+const logger = {
+  info: function (msg) {
+    console.log(format(new Date()) + ": [INFO]: " + msg);
+  },
+  warn: function (msg) {
+    console.warn(format(new Date()) + ": [WARN]: " + msg);
+  },
+  error: function (msg) {
+    console.error(format(new Date()) + ": [ERROR]: " + msg);
+  }
+};
+
+const add0 = function (m) {
+  return m < 10 ? '0' + m : m
+};
+
+const format = function (mills) {
+  //mills是整数，否则要parseInt转换
+  var time = new Date(mills);
+  var y = time.getFullYear();
+  var m = time.getMonth() + 1;
+  var d = time.getDate();
+  var h = time.getHours();
+  var mm = time.getMinutes();
+  var s = time.getSeconds();
+
+  return y + '-' + add0(m) + '-' + add0(d) + 'T' + add0(h) + ':' + add0(mm) + ':' + add0(s) + 'Z+0800';
+};
+
+var no_privilege_resp = {
+  "responses": [
+    {
+      "took": 1,
+      "timed_out": false,
+      "_shards": {
+        "total": 1,
+        "successful": 1,
+        "failed": 0
+      },
+      "hits": {
+        "total": 1,
+        "max_score": null,
+        "hits": [
+          {
+            "_index": "NO_PRIVILEGE",
+            "_type": "NO_PRIVILEGE",
+            "_id": "1",
+            "_score": null,
+            "_source": {
+              "@timestamp": "",
+              "level": "WARN",
+              "message": "你没有相关权限"
+            },
+            "fields": {
+              "@timestamp": [
+                1
+              ]
+            },
+            "highlight": {
+              "message": [
+                "@kibana-highlighted-field@你没有相关权限@/kibana-highlighted-field@"
+              ],
+              "level": ["@kibana-highlighted-field@WARN@/kibana-highlighted-field@"]
+            },
+            "sort": [
+              1
+            ]
+          }
+        ]
+      },
+      "aggregations": {
+        "2": {
+          "buckets": []
+        }
+      },
+      "status": 200
+    }
+  ]
+};

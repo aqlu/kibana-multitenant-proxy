@@ -16,5 +16,9 @@
   "bugs": {
     "url": "https://github.com/gnuhpc/kibana-auth-proxy/issues"
   },
-  "homepage": "https://github.com/gnuhpc/kibana-auth-proxy#readme"
+  "homepage": "https://github.com/gnuhpc/kibana-auth-proxy#readme",
+  "dependencies": {
+    "hoxy": "^3.2.1",
+    "sync-request": "^4.0.3"
+  }
 }

@@ -1,5 +1,7 @@
 "# kibana-multitenant-proxy"
 
+支持kibana 5.1
+
 
 该Proxy实现Kibana4访问Elasticsearch时数据的多租户数据访问隔离（一个用户只能看到限定的index）、字段脱敏、单Index查询范围限制等功能。欢迎试用和pr，提出宝贵意见和Star~
 
@@ -38,22 +40,34 @@ A proxy behind nginx while before kibana to provide data isolation for different
 
 ##代理配置
 * kibana_proxy配置采用json格式，相关信息配置在config.json文件中
-  *  `"port": "8888",` 代理监听端口
-  * `"refreshPort": "8889",` 配置以及用户信息刷新监听端口
-  * `"kibanaServer": "http://127.0.0.1:5601",`后端指向kibana地址以及端口
-  * `"es_Server":"http://127.0.0.1:9201/",` ElacticSaearch地址以及端口
-  * `"es_UserInfoUrl":"http://127.0.0.1:9201/.cmbc/user_info/",` 存放用户权限的地址
-  * `"chkTimeRange":"false",` 配置是否开启查询时间跨度检查
-  * `"totalNum":40000,` 当开启时间跨度检查时，单次查询最大支持的数据记录数
-  * `"dataMask":"true",` 配置是否开启数据脱敏
-  * 数据脱敏配置dataMaskConfig支持多个index前缀以及多个字段，并且支持正则表达式匹配，如下所示，将index前缀为logstash-sfshm的index中message字段里所有的2016替换为xxxx，@version字段中所有的1替换为x
-  * `{"indexPrefix":"logstash-sfshm","maskFields":[{"maskField":"message","maskReg":"/2016/g","maskValue":"xxxx"},{"maskField":"@version","maskReg":"/1/g","maskValue":"x"}]},`
+  *  `"port": "8888",` 代理监听端口，required
+  * `"refresh_port": "8889",` 配置以及用户信息刷新监听端口，required
+  * `"kibana_server": "http://127.0.0.1:5601",`后端指向kibana地址以及端口，required
+  * `"es_server":"http://127.0.0.1:9201/",` 存放用户权限的ElasticSearch地址以及端口，required
+  * `"es_user_index":".sys_auth",` 存放用户权限的索引名，required
+  * `"es_user_type":"user_info",` 存放用户权限的索引类型名，optional
+  * `"default_privileges":["logstash.+"],` 用户默认权限，数组。名称支持正常表达式，也可全名匹配。optional
+  * 数据脱敏配置`data_mask_config`支持多个index前缀以及多个字段，并且支持正则表达式匹配，optional。如下所示，将index前缀为`logstash`的index的`APP_LOG`中的`message`字段里所有的`2016`替换为`xxxx`，`@version`字段中所有的`1`替换为`x`：
+    `{"index_prefix":"logstash","type":"APP_LOG", "maskFields":[{"field":"message","reg":"/2016/g","value":"xxxx"},{"field":"@version","reg":"/1/g","value":"x"}]},`
 
 ##使用注意事项
 * Nginx相关配置
-  * 本代理借助Nginx的Basic Auth实现了用户的认证，需要使用htpassword在Nginx服务器端生成用户密码文件，可使用附带shell脚本进行快速配置，可使用三个参数： sh add_user_inES.sh 用户名 密码 可访问的index前缀 （如果用户名为root，则可以访问所有index） 
-  * 本代理在架构层面位于Nginx和Kibana之间，需要在Nginx中配置相应的端口映射，将用户访问的Nginx端口映射至proxy监听端口
+  * 如果借助Nginx的Basic Auth实现用户的认证，需要使用htpassword在Nginx服务器端生成用户密码文件。
+  * 如果借助Nginx的LDAP模块来鉴权，需要使用使用[nginx-auth-ldap](https://github.com/kvspb/nginx-auth-ldap)模块。
+  * 本代理在架构层面位于Nginx和Kibana之间，需要在Nginx中配置相应的端口映射，将用户访问的Nginx端口映射至proxy监听端口。
+* 用户权限配置（Proxy进程启动后，若要及时更新权限信息可以过访问刷新监听端口完成，http://localhost:8889/refresh ）
+  * 添加用户权限：
+    ```js
+    PUT /.sys_auth/user_info/{user}
+    {
+      "user": {user},
+      "indices": [
+        "ALL"
+      ]
+    }
+    ```
+    `indices`支持说明：可以是索引的全名、也可以是正则表达式、"ALL"表示拥有所有权限。只有拥有"ALL"权限的用户才能使用kibana的`Dev Tools`功能。
 * Kibana相关配置
-  * 通过将Kibana的配置文件kibana.yml配置为server.host: "localhost" ，可以屏蔽本地地址之外的IP对Kibana的5601端口访问，从而保证本地地址之外的IP只能通过Nginx和代理对Kibana进行访问，而通过代理的访问将是可控的，并且Nginx有相应访问日志可供查询
-* Proxy相关配置信息刷新
+  * 通过将Kibana的配置文件`kibana.yml`配置为`server.host: "localhost"` ，可以屏蔽本地地址之外的IP对Kibana的5601端口访问，从而保证本地地址之外的IP只能通过Nginx和代理对Kibana进行访问，而通过代理的访问将是可控的，并且Nginx有相应访问日志可供查询
+* Proxy权限与相关配置信息刷新
   * 代理启动时会对用户权限和相关配置信息进行同步，如果在运行状态，需要刷新相关信息，可访问代理的8889端口（可以进行配置）进行刷新
