@@ -29,6 +29,9 @@ var refreshFlag;
  * 校验用户是否有对应索引的权限
  */
 function validatePrivilege(user, indexName) {
+
+  //logger.info("validatePrivilege in ...", user, indexName);
+
   if (indexName == '.kibana') { //不校验.kibana索引的权限
     return true;
   }
@@ -71,6 +74,8 @@ function syncUserInfo() {
     var strResData = res.getBody().toString();
     var userResp = JSON.parse(strResData);
 
+    authInfo = {}; // 清空之前缓存的用户信息
+
     for (var i = 0; i < userResp['hits']['hits'].length; i++) {
       var user = userResp['hits']['hits'][i]['_source']['user'].toLowerCase();
       authInfo[user] = userResp['hits']['hits'][i]['_source']['indices'];
@@ -112,6 +117,8 @@ proxy.intercept({
   as: 'json'
 }, function (req, resp, cycle) {
 
+  // logger.info("reponse /elasticsearch/_msearch in ...");
+
   if (data_mask_config && data_mask_config.length > 0) { // 是否有脱敏配置
 
     // 判断响应结果是否包含数据
@@ -151,7 +158,8 @@ proxy.intercept({
   method: 'POST',
   as: 'string'
 }, function (req, resp, cycle) {
-  // var req_url = req.url;
+  // logger.info("request /elasticsearch/_msearch in ...");
+
   var req_user = req._data['headers']['remote_user'],
     x_real_ip = req._data['headers']['x-real-ip'],
     x_forwarded_for = req._data['headers']['x-forwarded-for'];
@@ -189,7 +197,8 @@ proxy.intercept({
   url: '/api/console/proxy', //DevTools发出的请求
   as: 'string'
 }, function (req, resp, cycle) {
-  // var req_url = req.url;
+  logger.info("request /api/console/proxy in ...");
+
   var req_user = req._data['headers']['remote_user'],
     x_real_ip = req._data['headers']['x-real-ip'],
     x_forwarded_for = req._data['headers']['x-forwarded-for'];
